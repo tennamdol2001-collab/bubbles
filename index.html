@@ -1,0 +1,995 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bubbles</title>
+<style>
+  /* The whole page is one full-screen canvas with a few small overlays on top. */
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;              /* no scroll bars, the toy fills the window */
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: #fff;
+    /* Step 1: soft blue gradient background (shows before the camera starts) */
+    background: linear-gradient(160deg, #bfe3ff 0%, #7fb8f0 55%, #4f86c9 100%);
+  }
+  canvas {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    touch-action: none;            /* stops the browser scrolling when you hold a finger on a phone */
+  }
+  video { display: none; }         /* the video is hidden; we draw it onto the canvas ourselves */
+
+  /* Start panel: the box with the Start button */
+  #start-panel {
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: min(420px, calc(100% - 32px));   /* 16px gutter on each side on small screens */
+    padding: 28px 24px;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.22);
+    backdrop-filter: blur(8px);
+    text-align: center;
+    box-shadow: 0 10px 40px rgba(20, 50, 100, 0.25);
+  }
+  #start-panel h1 { margin: 0 0 10px; font-size: 2.2rem; letter-spacing: 0.02em; }
+  #start-panel p  { margin: 0 0 20px; line-height: 1.45; font-size: 1rem; }
+  #start {
+    font: inherit;
+    font-size: 1.1rem;
+    font-weight: 600;
+    padding: 12px 36px;
+    border: none;
+    border-radius: 999px;
+    background: #fff;
+    color: #2f6db5;
+    cursor: pointer;
+  }
+  #start:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
+
+  /* Step 8: plain hint line along the bottom */
+  #hint {
+    position: fixed;
+    left: 16px;
+    right: 16px;
+    bottom: 16px;
+    margin: 0;
+    text-align: center;
+    font-size: 0.95rem;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+    pointer-events: none;          /* clicks go through to the canvas */
+  }
+
+  /* Step 6: small mic level meter (top right) used while tuning */
+  #meter {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    width: 140px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.35);
+    font-size: 11px;
+    pointer-events: none;
+    display: none;                 /* shown by the script when the mic is on */
+  }
+  #meter-bar { position: relative; height: 8px; margin-top: 4px; background: rgba(255,255,255,0.2); border-radius: 4px; }
+  #meter-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: #9fe6a0; border-radius: 4px; }
+  #meter-line { position: absolute; top: -3px; bottom: -3px; width: 2px; background: #ff6b6b; }
+
+  /* Camera button in the top-right corner: saves a photo */
+  #photo {
+    position: fixed;
+    right: 16px;
+    top: 16px;
+    width: 56px;
+    height: 56px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.85);
+    color: #2f6db5;
+    cursor: pointer;
+    display: none;                 /* shown after you press Start */
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  }
+  #photo:active { transform: scale(0.92); }
+  #photo:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
+
+  /* White flash when a photo is taken */
+  #flash {
+    position: fixed;
+    inset: 0;
+    background: #fff;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  @media (max-width: 480px) {
+    #photo { width: 48px; height: 48px; }
+    #start-panel h1 { font-size: 1.8rem; }
+    #hint { font-size: 0.85rem; }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="stage"></canvas>
+<video id="cam" playsinline muted></video>
+
+<div id="start-panel">
+  <h1>Bubbles</h1>
+  <p>Bubbles needs your camera to see your finger ring and your microphone to hear you blow, and nothing ever leaves your device.</p>
+  <button id="start">Start</button>
+</div>
+
+<p id="hint"></p>
+
+<!-- Camera button: click to save a picture of you and your bubbles -->
+<button id="photo" aria-label="Take a photo" title="Take a photo">
+  <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/>
+    <circle cx="12" cy="13.5" r="3.5"/>
+  </svg>
+</button>
+<div id="flash"></div>
+
+<div id="meter">
+  mic <span id="meter-num">0.000</span>
+  <div id="meter-bar"><div id="meter-fill"></div><div id="meter-line"></div></div>
+</div>
+
+<!-- MediaPipe Hands: the hand tracking library, loaded from a CDN (a public file server). -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+
+<script>
+// =====================================================================
+//  TUNING VALUES
+//  Change these numbers to change how the toy feels. Nothing else needs editing.
+// =====================================================================
+
+// --- Blowing (microphone) ---
+const BLOW_AT = 0.001;         // Mic loudness (0 = silent, 1 = max) that counts as a blow.
+                               // Raise it if talking makes bubbles; lower it if blowing is missed.
+const BLOW_FULL = 0.04;        // Loudness that counts as the hardest possible blow.
+                               // Anything between BLOW_AT and this is a "medium" blow.
+const MIC_SMOOTHING = 0.8;     // 0..1. Higher = the mic level changes more slowly (less jumpy).
+
+// --- Finger ring (hand tracking) ---
+const RING_GAP_MIN = 0.18;     // Smallest thumb-tip to index-tip gap that counts as a ring,
+const RING_GAP_MAX = 0.75;     // and the largest. Both are a share of palm size, so they work
+                               // at any distance from the camera. Widen the range if your ring is not detected.
+const RING_MEMORY_S = 0.4;     // Seconds a hand still counts as "the ring hand" after the ring breaks,
+                               // so a one-frame tracking glitch does not let it pop its own bubbles.
+const DETECT_CONFIDENCE = 0.6; // How sure MediaPipe must be to find a new hand (0..1). Lower in dim rooms.
+const TRACK_CONFIDENCE = 0.5;  // How sure it must be to keep following a hand it already found.
+
+// --- Bubbles ---
+const BUBBLE_R_MIN = 14;       // Bubble radius in pixels for the narrowest ring...
+const BUBBLE_R_MAX = 52;       // ...and for the widest ring. Sizes in between scale with ring width.
+const LIFE_MIN_S = 12;         // Shortest bubble lifespan in seconds before it pops by itself.
+const LIFE_MAX_S = 27;         // Longest lifespan. Shorten both for a busier screen.
+const FLOAT_UP = 0.004;        // Upward pull each frame (b.vy -= FLOAT_UP). Increase to rise faster.
+const AIR_DRAG = 0.985;        // Each frame, speed is multiplied by this. Lower = bubbles slow down sooner.
+const WOBBLE_PX = 0.35;        // How far bubbles sway sideways each frame (pixels).
+const MAX_BUBBLES = 60;        // Safety limit so the page stays smooth. No new bubbles above this.
+
+// --- How blow strength turns into bubbles ---
+const SPAWN_CHANCE_MIN = 0.15; // Chance per frame (0..1) of a new bubble on the softest blow...
+const SPAWN_CHANCE_MAX = 0.5;  // ...and on the hardest blow. More chance = more bubbles.
+const PUSH_MIN = 0.8;          // Starting speed (pixels per frame) on the softest blow...
+const PUSH_MAX = 5.0;          // ...and on the hardest. More push = bubbles travel further.
+
+// --- Fallbacks (used only when the camera or mic is refused) ---
+const WAVE_MIN = 4;            // No mic: ring speed (pixels per frame) that starts making bubbles...
+const WAVE_FULL = 25;          // ...and the speed that counts as the hardest "blow".
+const HOLD_RAMP_S = 1.5;       // Mouse/touch fallback: seconds of holding to reach the hardest blow.
+
+// --- Shaped bubbles (the bubble copies the outline your fingers make) ---
+const ROUND_ONLY = true;       // true = every bubble is a perfect circle. false = bubbles copy your finger shape.
+const SHAPE_POINTS = 48;       // How many points describe a bubble's outline. More = smoother but slower.
+const SHAPE_FOLLOW = 1.0;      // 0..1. 1 = copy your finger outline exactly, 0 = always round.
+const SHAPE_SMOOTHING = 1;    // How many times to smooth the outline. More = rounder, less = sharper heart points.
+const TWO_HAND_TOUCH = 0.45;   // Two hands make one shape when BOTH thumb tips and BOTH index tips are
+                               // closer than this (share of palm size). Raise it if your heart is not detected.
+const TWO_HAND_SIZE = 0.45;    // Two-hand shapes are big, so their bubbles are this share of the shape's size...
+const SHAPE_R_MAX = 90;        // ...but never bigger than this radius in pixels.
+
+// --- Look ---
+const CAMERA_BRIGHTNESS = 0.72; // How visible the camera is (1 = full). Lower = dimmer, bubbles stand out more.
+const SHOW_MIC_METER = false;   // Set to true to show a little mic meter (top right) while tuning BLOW_AT.
+const SHOW_HINT = false;        // Set to true to show the help text along the bottom of the screen.
+
+// =====================================================================
+//  SETUP: grab the page elements and get the canvas ready
+// =====================================================================
+
+const canvas = document.getElementById('stage');
+const ctx = canvas.getContext('2d');
+const video = document.getElementById('cam');
+const startPanel = document.getElementById('start-panel');
+const startButton = document.getElementById('start');
+const hint = document.getElementById('hint');
+const meter = document.getElementById('meter');
+const meterFill = document.getElementById('meter-fill');
+const meterLine = document.getElementById('meter-line');
+const meterNum = document.getElementById('meter-num');
+const photoButton = document.getElementById('photo');
+const flash = document.getElementById('flash');
+
+// Does the user prefer less motion? (a setting in their operating system)
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// Screen size in CSS pixels. We redo this whenever the window changes size.
+let W = 0, H = 0;
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2); // cap at 2 so big screens stay fast
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  // After this line we can draw using normal CSS pixel numbers.
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// What is working? These get set after the user presses Start.
+let started = false;
+let cameraOK = false;   // camera permission given and video playing
+let handsOK = false;    // the MediaPipe library loaded
+let micOK = false;      // microphone permission given
+
+// Small helpers
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+// =====================================================================
+//  STEP 1 + 8: Start button, permissions, and fallbacks
+// =====================================================================
+
+startButton.addEventListener('click', start);
+
+async function start() {
+  startButton.disabled = true;
+  let videoStream = null, audioStream = null;
+
+  // Make the sound engine RIGHT NOW, while the click is still "fresh".
+  // Safari keeps sound paused if this happens later (after the permission questions).
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  audioCtx.resume();
+
+  // Mic settings: switch off the "helpful" processing so breath noise is not filtered away.
+  const audioSettings = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+  const videoSettings = { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } };
+
+  // Ask for camera and mic together (one prompt). If that fails, ask for each one
+  // on its own, so refusing one still lets the other work.
+  try {
+    const both = await navigator.mediaDevices.getUserMedia({ video: videoSettings, audio: audioSettings });
+    videoStream = new MediaStream(both.getVideoTracks());
+    audioStream = new MediaStream(both.getAudioTracks());
+  } catch (e) {
+    try { videoStream = await navigator.mediaDevices.getUserMedia({ video: videoSettings }); } catch (e2) {}
+    try { audioStream = await navigator.mediaDevices.getUserMedia({ audio: audioSettings }); } catch (e3) {}
+  }
+
+  if (videoStream) await startCamera(videoStream);
+  if (audioStream) startMic(audioStream);
+  if (cameraOK) startHands();
+
+  startPanel.style.display = 'none';
+  photoButton.style.display = 'flex';
+  started = true;
+  updateHint();
+}
+
+// Step 8: the hint line tells you what to do, based on what is working.
+let handsReady = false; // becomes true when MediaPipe sends its first result
+function updateHint() {
+  if (!started || !SHOW_HINT) return;
+  if (!cameraOK || !handsOK) {
+    hint.textContent = 'Hold the mouse (or your finger) down to blow bubbles. Click a bubble to pop it.';
+  } else if (!handsReady) {
+    hint.textContent = 'Loading hand tracking…';
+  } else if (!micOK) {
+    hint.textContent = 'No microphone: make a ring with your thumb and index finger and wave it, or hold the mouse down. Touch bubbles to pop them.';
+  } else {
+    hint.textContent = 'Make a ring with your fingers (or a heart with both hands) and blow through it. Touch bubbles to pop them.';
+  }
+}
+
+// =====================================================================
+//  STEP 2: Camera, mirrored, filling the screen
+// =====================================================================
+
+async function startCamera(stream) {
+  video.srcObject = stream;
+  try {
+    await video.play();
+    cameraOK = true;
+  } catch (e) {
+    cameraOK = false;
+  }
+}
+
+// Works out how to stretch the video so it covers the whole screen without
+// squashing it (like CSS "object-fit: cover"). Some edges get cropped.
+function videoFit() {
+  const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
+  const scale = Math.max(W / vw, H / vh);
+  const dw = vw * scale, dh = vh * scale;
+  return { x: (W - dw) / 2, y: (H - dh) / 2, w: dw, h: dh };
+}
+
+function drawCamera() {
+  if (!cameraOK || video.readyState < 2) return;
+  const f = videoFit();
+  ctx.save();
+  ctx.globalAlpha = CAMERA_BRIGHTNESS;   // see-through, so the blue background dims and tints it
+  ctx.translate(W, 0);                    // flip left-to-right, like a mirror
+  ctx.scale(-1, 1);
+  ctx.drawImage(video, f.x, f.y, f.w, f.h);
+  ctx.restore();
+}
+
+function drawBackground() {
+  const g = ctx.createLinearGradient(0, 0, W * 0.4, H);
+  g.addColorStop(0, '#bfe3ff');
+  g.addColorStop(0.55, '#7fb8f0');
+  g.addColorStop(1, '#4f86c9');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  if (cameraOK) {                         // a little extra darkening behind the camera image
+    ctx.fillStyle = 'rgba(10, 25, 50, 0.45)';
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+// =====================================================================
+//  STEP 3: Bubbles that look like soap and float
+// =====================================================================
+
+let bubbles = [];   // every bubble on screen
+let droplets = [];  // tiny dots that fly out when a bubble pops
+
+// Make one new bubble at (x, y). "strength" is 0..1 (how hard the blow is).
+// "shape" is the outline to copy (from makeShape), or nothing for a round bubble.
+function spawnBubble(x, y, radius, strength, dirX, dirY, shape) {
+  if (bubbles.length >= MAX_BUBBLES) return;
+
+  // Which way it flies: mostly upward and sideways, unless a direction is given (from waving).
+  let angle = -Math.PI / 2 + rand(-0.7, 0.7) * Math.PI;
+  if (dirX !== undefined && (dirX || dirY)) angle = Math.atan2(dirY, dirX) + rand(-0.5, 0.5);
+
+  // Harder blow = faster start = travels further before air drag slows it down.
+  let speed = (PUSH_MIN + (PUSH_MAX - PUSH_MIN) * strength) * rand(0.7, 1.15);
+  if (reducedMotion) speed *= 0.5;
+
+  bubbles.push({
+    x, y,
+    r: radius,
+    vx: Math.cos(angle) * speed,
+    vy: Math.sin(angle) * speed,
+    age: 0,                              // seconds alive
+    life: rand(LIFE_MIN_S, LIFE_MAX_S),  // seconds until it pops by itself
+    phase: rand(0, Math.PI * 2),         // so bubbles do not all wobble in step
+    wobbleSpeed: rand(0.8, 1.6),
+    hue: rand(0, 360),                   // starting colour of its rainbow rim
+    sparkle: Math.random() < 0.5,        // half the bubbles get a twinkling star
+    path: makeBubblePath(radius, shape), // the outline, worked out once so drawing stays fast
+  });
+}
+
+// Build the outline of a bubble as a "Path2D" (a reusable drawing path), centred on (0, 0).
+// shape = a list of numbers, one per direction around the centre: how far the edge is
+// in that direction (1 = normal radius). No shape = a plain circle.
+function makeBubblePath(r, shape) {
+  const p = new Path2D();
+  if (!shape) {
+    p.arc(0, 0, r, 0, Math.PI * 2);
+    return p;
+  }
+  const n = shape.length;
+  const point = (i) => {
+    const a = ((i % n) / n) * Math.PI * 2;
+    const k = r * shape[i % n];
+    return [Math.cos(a) * k, Math.sin(a) * k];
+  };
+  // Curve smoothly through the points (each curve ends half-way to the next point).
+  const [x0, y0] = point(n - 1), [x1, y1] = point(0);
+  p.moveTo((x0 + x1) / 2, (y0 + y1) / 2);
+  for (let i = 0; i < n; i++) {
+    const [ax, ay] = point(i), [bx, by] = point(i + 1);
+    p.quadraticCurveTo(ax, ay, (ax + bx) / 2, (ay + by) / 2);
+  }
+  p.closePath();
+  return p;
+}
+
+// Turn a loop of finger points (screen pixels) into a bubble shape.
+// From the middle of the loop we look out in SHAPE_POINTS directions and measure
+// how far away the finger outline is in each one.
+function makeShape(loop) {
+  let cx = 0, cy = 0;
+  for (const p of loop) { cx += p.x; cy += p.y; }
+  cx /= loop.length; cy /= loop.length;
+
+  const radii = new Float32Array(SHAPE_POINTS);
+  for (let i = 0; i < SHAPE_POINTS; i++) {
+    const a = (i / SHAPE_POINTS) * Math.PI * 2;
+    const dx = Math.cos(a), dy = Math.sin(a);
+    let nearest = Infinity;
+    // Check every edge of the loop: where does this direction cross it?
+    for (let j = 0; j < loop.length; j++) {
+      const p = loop[j], q = loop[(j + 1) % loop.length];
+      const ex = q.x - p.x, ey = q.y - p.y;
+      const den = dx * ey - dy * ex;
+      if (Math.abs(den) < 1e-9) continue;            // parallel, never crosses
+      const wx = p.x - cx, wy = p.y - cy;
+      const t = (wx * ey - wy * ex) / den;           // distance from the middle
+      const s = (wx * dy - wy * dx) / den;           // where along the edge (0..1)
+      if (t > 0 && s >= 0 && s <= 1 && t < nearest) nearest = t;
+    }
+    radii[i] = nearest;
+  }
+
+  // Average size; fill any gaps with it.
+  let sum = 0, count = 0;
+  for (const v of radii) if (isFinite(v)) { sum += v; count++; }
+  const mean = count ? sum / count : 1;
+  for (let i = 0; i < SHAPE_POINTS; i++) if (!isFinite(radii[i])) radii[i] = mean;
+
+  // Smooth out finger bumps (each point becomes the average of itself and its neighbours).
+  let shape = radii;
+  for (let pass = 0; pass < SHAPE_SMOOTHING; pass++) {
+    const next = new Float32Array(SHAPE_POINTS);
+    for (let i = 0; i < SHAPE_POINTS; i++) {
+      next[i] = (shape[(i + SHAPE_POINTS - 1) % SHAPE_POINTS] + shape[i] * 2 + shape[(i + 1) % SHAPE_POINTS]) / 4;
+    }
+    shape = next;
+  }
+
+  // Make the average 1, mix with a circle (SHAPE_FOLLOW), and stop any extreme spikes.
+  for (let i = 0; i < SHAPE_POINTS; i++) {
+    const v = shape[i] / mean;
+    shape[i] = Math.max(0.35, Math.min(1.8, 1 - SHAPE_FOLLOW + v * SHAPE_FOLLOW));
+  }
+  return { centre: { x: cx, y: cy }, shape, sizePx: mean };
+}
+
+// Move every bubble a little. "f" is how many 60fps-frames of time have passed (about 1).
+function updateBubbles(f, dtSeconds) {
+  const drag = Math.pow(AIR_DRAG, f);
+  const wobble = reducedMotion ? WOBBLE_PX * 0.25 : WOBBLE_PX;
+  for (const b of bubbles) {
+    b.age += dtSeconds;
+    b.vy -= FLOAT_UP * f;                // slow float upward
+    b.vx *= drag;                        // air drag slows it down
+    b.vy *= drag;
+    b.x += (b.vx + Math.sin(b.age * b.wobbleSpeed * 2 + b.phase) * wobble) * f; // sideways sine wobble
+    b.y += b.vy * f;
+    if (b.age > b.life) b.dead = 'pop';  // old enough: pop by itself
+    // Gone off the screen: remove quietly (no pop).
+    if (b.y < -b.r * 2 || b.x < -b.r * 3 || b.x > W + b.r * 3 || b.y > H + b.r * 3) b.dead = b.dead || 'gone';
+  }
+  for (const b of bubbles) if (b.dead === 'pop') makeDroplets(b);
+  bubbles = bubbles.filter((b) => !b.dead);
+}
+
+function popBubble(b) {
+  if (!b.dead) b.dead = 'pop';
+}
+
+// A small ring of droplets flying outward.
+function makeDroplets(b) {
+  const count = reducedMotion ? 6 : 10;
+  for (let i = 0; i < count; i++) {
+    const a = (i / count) * Math.PI * 2 + rand(-0.2, 0.2);
+    const s = reducedMotion ? rand(0.5, 1) : rand(1.2, 2.6);
+    droplets.push({
+      x: b.x + Math.cos(a) * b.r,
+      y: b.y + Math.sin(a) * b.r,
+      vx: Math.cos(a) * s,
+      vy: Math.sin(a) * s,
+      age: 0,
+      life: reducedMotion ? 0.3 : 0.45,  // seconds
+      size: Math.max(1.2, b.r * 0.06),
+    });
+  }
+}
+
+function updateDroplets(f, dtSeconds) {
+  for (const d of droplets) {
+    d.age += dtSeconds;
+    d.x += d.vx * f;
+    d.y += d.vy * f;
+    d.vy += 0.05 * f;                    // droplets fall a tiny bit
+  }
+  droplets = droplets.filter((d) => d.age < d.life);
+}
+
+function drawDroplets() {
+  ctx.fillStyle = '#fff';
+  for (const d of droplets) {
+    ctx.globalAlpha = 0.8 * (1 - d.age / d.life);  // fade out
+    ctx.beginPath();
+    ctx.arc(d.x, d.y, d.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// Thin-film colours seen on real soap: magenta, gold, cyan, violet, pink, yellow, blue.
+const FILM_HUES = [300, 45, 185, 265, 330, 55, 205];
+
+// Draw one soap bubble, built up in layers like a painting.
+function drawBubble(b, time) {
+  const r = b.r;
+  const path = b.path;
+  // Gentle wobble: squash it a tiny bit wide, then tall, over and over.
+  const squish = reducedMotion ? 1 : 1 + 0.045 * Math.sin(b.age * 3.1 + b.phase);
+  // The colours slowly turn round the bubble, so they shift over time.
+  const spin = (time * (reducedMotion ? 0.05 : 0.25) + b.phase) % (Math.PI * 2);
+  const shift = (b.hue + time * 15) % 360;
+
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.scale(squish, 1 / squish);
+
+  // The rainbow: a "conic" gradient goes round the bubble like a colour wheel.
+  const film = ctx.createConicGradient(spin, 0, 0);
+  FILM_HUES.forEach((h, i) => {
+    film.addColorStop(i / (FILM_HUES.length - 1), `hsl(${(h + shift * 0.3) % 360}, 95%, 72%)`);
+  });
+
+  // 1. Body: clear in the middle, a faint blue-white haze towards the edge.
+  const body = ctx.createRadialGradient(0, 0, r * 0.2, 0, 0, r * 1.1);
+  body.addColorStop(0, 'rgba(255,255,255,0)');
+  body.addColorStop(0.75, 'rgba(210,235,255,0.05)');
+  body.addColorStop(1, 'rgba(230,245,255,0.22)');
+  ctx.fillStyle = body;
+  ctx.fill(path);
+
+  // 2. Inside the edge only ("clip" = paint only inside the bubble):
+  ctx.save();
+  ctx.clip(path);
+  //    a soft wide band of rainbow film just inside the rim...
+  ctx.strokeStyle = film;
+  ctx.globalAlpha = 0.28;
+  ctx.lineWidth = r * 0.5;
+  ctx.stroke(path);
+  //    ...and a faint reflection of the room: darker band below, lighter "sky" above.
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = 'rgba(25,45,80,0.10)';
+  ctx.beginPath();
+  ctx.ellipse(0, r * 0.38, r * 0.95, r * 0.2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  ctx.beginPath();
+  ctx.ellipse(0, -r * 0.3, r * 0.8, r * 0.3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // 3. The crisp shiny rim: thin rainbow line plus a whisper of white.
+  ctx.strokeStyle = film;
+  ctx.globalAlpha = 0.85;
+  ctx.lineWidth = Math.max(1, r * 0.035);
+  ctx.stroke(path);
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = Math.max(0.6, r * 0.012);
+  ctx.stroke(path);
+
+  // 4. Glints: a big soft shine top-left and a small one bottom-right.
+  glint(-r * 0.45, -r * 0.45, r * 0.3, 0.9);
+  glint(r * 0.5, r * 0.5, r * 0.13, 0.5);
+
+  // 5. A twinkling star on some bubbles.
+  if (b.sparkle) {
+    const twinkle = reducedMotion ? 0.8 : 0.45 + 0.55 * Math.abs(Math.sin(time * 2.5 + b.phase));
+    sparkle(-r * 0.62, -r * 0.6, Math.max(4, r * 0.32) * twinkle, 0.95 * twinkle);
+  }
+
+  ctx.restore();
+}
+
+// A soft round white shine that fades out at its edge.
+function glint(x, y, size, alpha) {
+  const g = ctx.createRadialGradient(x, y, 0, x, y, size);
+  g.addColorStop(0, `rgba(255,255,255,${alpha})`);
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(x, y, size, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// A four-pointed white star (the "twinkle").
+function sparkle(x, y, s, alpha) {
+  ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+  ctx.beginPath();
+  ctx.moveTo(x, y - s);
+  ctx.quadraticCurveTo(x, y, x + s, y);
+  ctx.quadraticCurveTo(x, y, x, y + s);
+  ctx.quadraticCurveTo(x, y, x - s, y);
+  ctx.quadraticCurveTo(x, y, x, y - s);
+  ctx.fill();
+}
+
+// =====================================================================
+//  STEP 3 (and 8): Mouse / touch. Click pops a bubble; holding blows (fallback only).
+// =====================================================================
+
+const pointer = { down: false, x: 0, y: 0, heldFor: 0 };
+
+// Holding to blow is only allowed if the camera, hand tracking, or mic is missing.
+function pointerBlowAllowed() {
+  return !cameraOK || !handsOK || !micOK;
+}
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (!started) return;
+  pointer.x = e.clientX;
+  pointer.y = e.clientY;
+  // Pop the top-most bubble under the pointer, if there is one.
+  for (let i = bubbles.length - 1; i >= 0; i--) {
+    const b = bubbles[i];
+    if (Math.hypot(b.x - e.clientX, b.y - e.clientY) < b.r) {
+      popBubble(b);
+      return;                             // a click on a bubble only pops, it does not blow
+    }
+  }
+  if (pointerBlowAllowed()) {
+    pointer.down = true;
+    pointer.heldFor = 0;
+  }
+});
+canvas.addEventListener('pointermove', (e) => { pointer.x = e.clientX; pointer.y = e.clientY; });
+function pointerUp() { pointer.down = false; }
+canvas.addEventListener('pointerup', pointerUp);
+canvas.addEventListener('pointercancel', pointerUp);
+canvas.addEventListener('pointerleave', pointerUp);
+
+// =====================================================================
+//  STEP 4: Hand tracking with MediaPipe, and the ring marker
+// =====================================================================
+
+let handTracker = null;
+let trackerBusy = false;
+let trackedHands = [];       // the hands MediaPipe found in its latest result
+const lastRingTime = {};     // when each hand ("Left"/"Right") last made a ring, in seconds
+const FINGERTIPS = [4, 8, 12, 16, 20]; // thumb, index, middle, ring and little finger tips
+
+function startHands() {
+  if (typeof Hands === 'undefined') {    // the library failed to load (offline?)
+    handsOK = false;
+    return;
+  }
+  handTracker = new Hands({
+    // Tells MediaPipe where to download its model files from.
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`,
+  });
+  handTracker.setOptions({
+    maxNumHands: 2,
+    modelComplexity: 0,                  // the fast, lighter model
+    minDetectionConfidence: DETECT_CONFIDENCE,
+    minTrackingConfidence: TRACK_CONFIDENCE,
+    selfieMode: true,                    // results come back mirrored, matching what we draw
+  });
+  handTracker.onResults(onHandResults);
+  handsOK = true;
+}
+
+// Send the current camera picture to MediaPipe. It answers later in onHandResults.
+async function trackHands() {
+  if (!handTracker || trackerBusy || video.readyState < 2) return;
+  trackerBusy = true;
+  try {
+    await handTracker.send({ image: video });
+  } catch (e) {
+    console.warn('Hand tracking error', e);
+  }
+  trackerBusy = false;
+}
+
+// MediaPipe gives each hand as 21 points (landmarks) with x and y from 0 to 1.
+// Here we turn them into screen pixels and work out if the hand is making a ring.
+function onHandResults(results) {
+  if (!handsReady) { handsReady = true; updateHint(); }
+  const now = performance.now() / 1000;
+  const fit = videoFit();
+  const found = [];
+  const lists = results.multiHandLandmarks || [];
+  for (let i = 0; i < lists.length; i++) {
+    const label = (results.multiHandedness && results.multiHandedness[i] && results.multiHandedness[i].label) || ('hand' + i);
+    // Landmark (0..1) -> screen pixel. Same "cover" fit as the camera picture.
+    const pts = lists[i].map((p) => ({ x: fit.x + p.x * fit.w, y: fit.y + p.y * fit.h }));
+
+    // Palm size = wrist (0) to the base of the middle finger (9). Hands look smaller
+    // when far away, so we measure the ring gap compared to this.
+    const palm = Math.max(1, dist(pts[0], pts[9]));
+    const gap = dist(pts[4], pts[8]) / palm;          // thumb tip to index tip
+    const isRing = gap >= RING_GAP_MIN && gap <= RING_GAP_MAX;
+
+    found.push({ label, pts, palm, gap, isRing });
+  }
+
+  // TWO HANDS, ONE SHAPE: both thumb tips touching and both index tips touching
+  // (like a heart or a triangle). Your two hands then make one big loop.
+  let ring = null;
+  if (found.length === 2) {
+    const [A, B] = found;
+    const palm = (A.palm + B.palm) / 2;
+    const thumbsTouch = dist(A.pts[4], B.pts[4]) / palm < TWO_HAND_TOUCH;
+    const indexesTouch = dist(A.pts[8], B.pts[8]) / palm < TWO_HAND_TOUCH;
+    if (thumbsTouch && indexesTouch) {
+      // Walk round the loop: up A's index finger, down B's index finger,
+      // along B's thumb, back along A's thumb.
+      const loop = [5, 6, 7, 8].map((i) => A.pts[i])
+        .concat([8, 7, 6, 5].map((i) => B.pts[i]))
+        .concat([2, 3, 4].map((i) => B.pts[i]))
+        .concat([4, 3, 2].map((i) => A.pts[i]));
+      ring = makeShape(loop);
+      ring.twoHands = true;
+      A.isRing = B.isRing = true;       // both hands are "blowing" hands: they will not pop
+    }
+  }
+
+  // ONE HAND: the loop made by the thumb and index finger.
+  if (!ring) {
+    const h = found.find((x) => x.isRing);
+    if (h) {
+      ring = makeShape([2, 3, 4, 8, 7, 6, 5].map((i) => h.pts[i]));
+      ring.gap = h.gap;
+    }
+  }
+
+  for (const h of found) {
+    if (h.isRing) lastRingTime[h.label] = now;
+    // "Ring hand" = made a ring just now, or very recently (see RING_MEMORY_S).
+    h.isRingHand = h.isRing || (lastRingTime[h.label] !== undefined && now - lastRingTime[h.label] < RING_MEMORY_S);
+  }
+  trackedHands = found;
+  activeRing = ring;
+}
+
+// The ring (or two-hand shape) being made right now, or null.
+// It has: centre (x, y), shape (the outline), sizePx (how big it is on screen),
+// and either gap (one hand) or twoHands = true.
+let activeRing = null;
+function currentRing() {
+  return activeRing;
+}
+
+// Step 4: a faint white outline follows the ring, so you can see what is tracked.
+function drawRingMarkers() {
+  const ring = currentRing();
+  if (!ring || photoNow) return;        // hidden in photos
+  ctx.save();
+  ctx.translate(ring.centre.x, ring.centre.y);
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+  ctx.stroke(makeBubblePath(Math.max(10, ring.sizePx), ROUND_ONLY ? null : ring.shape));
+  ctx.restore();
+}
+
+// =====================================================================
+//  STEP 5: Fingertips pop bubbles, but not on the hand making the ring
+// =====================================================================
+
+function popWithFingertips() {
+  for (const h of trackedHands) {
+    if (h.isRingHand) continue;          // the blowing hand must not pop its own bubbles
+    for (const tip of FINGERTIPS) {
+      const p = h.pts[tip];
+      for (const b of bubbles) {
+        if (!b.dead && Math.hypot(b.x - p.x, b.y - p.y) < b.r) popBubble(b);
+      }
+    }
+  }
+}
+
+// =====================================================================
+//  STEP 6: Microphone blow detection, with a small level meter
+// =====================================================================
+
+let audioCtx = null;          // the browser's sound engine (made when you press Start)
+let analyser = null;
+let micData = null;
+let micLevel = 0;            // smoothed loudness, 0..1
+
+// Safety net for Safari: if sound is still paused, any click or tap wakes it up.
+document.addEventListener('pointerdown', () => {
+  if (audioCtx && audioCtx.state !== 'running') audioCtx.resume();
+});
+
+function startMic(stream) {
+  try {
+    if (audioCtx.state !== 'running') audioCtx.resume();
+    const source = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    micData = new Float32Array(analyser.fftSize);
+    source.connect(analyser);            // NOT connected to the speakers, so you never hear yourself
+    micOK = true;
+    meterLine.style.left = (BLOW_AT * 100 / 0.05) + '%';  // red line = BLOW_AT (meter shows 0 to 0.05)
+    if (SHOW_MIC_METER) meter.style.display = 'block';
+  } catch (e) {
+    micOK = false;
+  }
+}
+
+// Loudness right now, as RMS ("root mean square": a kind of average size of the sound wave).
+function readMicLevel() {
+  if (!analyser) return 0;
+  analyser.getFloatTimeDomainData(micData);
+  let sum = 0;
+  for (let i = 0; i < micData.length; i++) sum += micData[i] * micData[i];
+  return Math.sqrt(sum / micData.length);
+}
+
+function updateMeter() {
+  if (!SHOW_MIC_METER || !micOK) return;
+  meterFill.style.width = Math.min(100, micLevel * 100 / 0.05) + '%';
+  meterFill.style.background = micLevel > BLOW_AT ? '#ffd36b' : '#9fe6a0'; // yellow = counts as blowing
+  meterNum.textContent = micLevel.toFixed(3);
+}
+
+// =====================================================================
+//  STEP 7: Bubbles only when a ring is tracked AND a blow is heard
+//  (plus the fallbacks from step 8 when something is missing)
+// =====================================================================
+
+let lastRingCentre = null;
+let waveSpeed = 0;           // how fast the ring is moving (only used when there is no mic)
+
+function blowAndSpawn(f, dtSeconds) {
+  // How hard is the blow? 0 = not blowing, 1 = hardest.
+  micLevel = micLevel * MIC_SMOOTHING + readMicLevel() * (1 - MIC_SMOOTHING);
+  const micStrength = micOK && micLevel > BLOW_AT ? clamp01((micLevel - BLOW_AT) / (BLOW_FULL - BLOW_AT)) : 0;
+  const micBlowing = micOK && micLevel > BLOW_AT;
+
+  const ring = currentRing();
+
+  // Ring speed, for the no-mic "wave the ring" fallback.
+  let moveX = 0, moveY = 0;
+  if (ring && lastRingCentre) {
+    moveX = ring.centre.x - lastRingCentre.x;
+    moveY = ring.centre.y - lastRingCentre.y;
+    waveSpeed = waveSpeed * 0.7 + (Math.hypot(moveX, moveY) / f) * 0.3;
+  } else {
+    waveSpeed = 0;
+  }
+  lastRingCentre = ring ? ring.centre : null;
+
+  // Holding the mouse: the longer you hold, the harder the blow.
+  let holdStrength = 0;
+  if (pointer.down) {
+    pointer.heldFor += dtSeconds;
+    holdStrength = 0.15 + 0.85 * clamp01(pointer.heldFor / HOLD_RAMP_S);
+  }
+
+  // Decide where bubbles come from and how hard the blow is.
+  let x, y, strength = 0, radius, dirX, dirY, shape;
+  if (ring) {
+    // Normal way: ring tracked + mic hears a blow.
+    if (micBlowing) strength = Math.max(micStrength, 0.0001);
+    // No mic: waving the ring counts as blowing, and bubbles fly the way you wave.
+    if (!micOK && waveSpeed > WAVE_MIN) {
+      strength = clamp01((waveSpeed - WAVE_MIN) / (WAVE_FULL - WAVE_MIN));
+      dirX = moveX; dirY = moveY;
+    }
+    // No mic: holding the mouse also blows through the ring.
+    if (!micOK && pointer.down) strength = Math.max(strength, holdStrength);
+    x = ring.centre.x; y = ring.centre.y;
+    if (ring.twoHands) {
+      // Two-hand shapes: bubble size follows the size of the shape.
+      radius = Math.min(SHAPE_R_MAX, Math.max(BUBBLE_R_MIN, ring.sizePx * TWO_HAND_SIZE));
+    } else {
+      // One hand: wider ring = bigger bubble.
+      const t = clamp01((ring.gap - RING_GAP_MIN) / (RING_GAP_MAX - RING_GAP_MIN));
+      radius = BUBBLE_R_MIN + (BUBBLE_R_MAX - BUBBLE_R_MIN) * t;
+    }
+    shape = ROUND_ONLY ? undefined : ring.shape;   // no shape = round bubble
+  } else if (pointer.down && (!cameraOK || !handsOK)) {
+    // No camera or no hand tracking: bubbles come from the mouse / finger.
+    strength = holdStrength;
+    x = pointer.x; y = pointer.y;
+    radius = rand(BUBBLE_R_MIN, BUBBLE_R_MAX);
+  }
+
+  if (strength <= 0) return;   // not blowing (or no ring): no bubbles
+
+  // Harder blow = a bigger chance of a new bubble each frame = more bubbles.
+  let chance = (SPAWN_CHANCE_MIN + (SPAWN_CHANCE_MAX - SPAWN_CHANCE_MIN) * strength) * f;
+  if (reducedMotion) chance *= 0.6;
+  while (chance > 0) {
+    if (Math.random() < chance) {
+      spawnBubble(x + rand(-4, 4), y + rand(-4, 4), radius * rand(0.85, 1.15), strength, dirX, dirY, shape);
+    }
+    chance -= 1;
+  }
+}
+
+// =====================================================================
+//  PHOTO: the camera button saves a picture of the screen to Downloads
+// =====================================================================
+
+let photoNow = false;        // true for one frame while the picture is taken
+
+photoButton.addEventListener('click', () => { photoNow = true; });
+
+// Called by the main loop after the bubbles are drawn (and before the ring outline,
+// so the outline is not in the photo).
+function takePhoto() {
+  photoNow = false;
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    // Name the file with the date and time, e.g. bubbles-2026-11-16-14-05-33.png
+    const d = new Date();
+    const two = (n) => String(n).padStart(2, '0');
+    const name = `bubbles-${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}-${two(d.getHours())}-${two(d.getMinutes())}-${two(d.getSeconds())}.png`;
+    // Make a temporary download link, click it, then tidy up.
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }, 'image/png');
+
+  // A quick white flash, like a camera.
+  flash.style.transition = 'none';
+  flash.style.opacity = reducedMotion ? '0.3' : '0.7';
+  flash.getBoundingClientRect();            // makes the browser notice the change before fading
+  flash.style.transition = 'opacity 0.4s ease-out';
+  flash.style.opacity = '0';
+}
+
+// =====================================================================
+//  THE MAIN LOOP: runs about 60 times a second and redraws everything
+// =====================================================================
+
+let lastTime = performance.now();
+function frame(now) {
+  const dtSeconds = Math.min(0.05, (now - lastTime) / 1000); // cap, so a paused tab does not jump
+  lastTime = now;
+  const f = dtSeconds * 60;               // 1.0 at 60 frames per second
+  const time = now / 1000;
+
+  drawBackground();
+  drawCamera();
+
+  if (started) {
+    blowAndSpawn(f, dtSeconds);
+    popWithFingertips();
+    updateBubbles(f, dtSeconds);
+    updateDroplets(f, dtSeconds);
+    updateMeter();
+    trackHands();                         // ask MediaPipe to look at the next camera picture
+  }
+
+  for (const b of bubbles) drawBubble(b, time);
+  drawDroplets();
+  if (photoNow) takePhoto();              // snapshot now: bubbles in, ring outline out
+  drawRingMarkers();
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
